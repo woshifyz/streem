@@ -80,6 +80,7 @@ class FuncInstance(object):
 class FuncLoader(object):
     _DEFAULT_LOAD_ORDER = ['.', '/usr/local/etc/streem', '/etc/streem']
     _ENV_PATH_KEY = 'STREEM_LIB_PATH'
+    _MAX_NO_USE_FILE_NUM_IN_ONE_DIR = 500
 
     _INSTANCE = None
 
@@ -89,7 +90,7 @@ class FuncLoader(object):
             cls._INSTANCE = cls()
         return cls._INSTANCE
 
-    def __init__(self):
+    def __init__(self, include=None):
         if os.environ.has_key(self._ENV_PATH_KEY):
             self._DEFAULT_LOAD_ORDER.insert(0, os.environ.get(self._ENV_PATH_KEY))
 
@@ -130,6 +131,7 @@ class FuncLoader(object):
         
     def listPyFiles(self, dir):
         files = set()
+        nonLibFileCount = 0
         for root, dirs, fs in os.walk(os.path.abspath(dir)):
             if not fs:
                 continue
@@ -137,6 +139,10 @@ class FuncLoader(object):
             for f in fs:
                 if f.endswith('.py'):
                     files.add(os.path.join(root, f)) 
+                else:
+                    nonLibFileCount += 1
+                    if nonLibFileCount > self._MAX_NO_USE_FILE_NUM_IN_ONE_DIR:
+                        raise Exception("too many no use file in lib dir, please check your location")
         return files
 
     def listAll(self):
@@ -384,9 +390,12 @@ if __name__ == '__main__':
     parser.add_argument("-f", help="file to execute")
     parser.add_argument("-e", help="eval string")
     parser.add_argument("--debug", help="debug sign", action="store_true")
-    parser.add_argument("-l", "--list", help="list all functions", action="store_true")
+    parser.add_argument("--list", help="list all functions", action="store_true")
+    parser.add_argument("-i", "--include", help="add lib dir")
     args = parser.parse_args()
 
+    if args.include:
+        FuncLoader._DEFAULT_LOAD_ORDER.insert(0, args.include)
     if args.list:
         FuncLoader.instance().listAll()
     else:
