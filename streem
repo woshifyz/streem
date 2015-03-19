@@ -1,0 +1,400 @@
+#!/usr/bin/env python
+# coding: utf8
+
+from pyparsing import *
+import string
+import sys
+import os, os.path
+import inspect
+import imp
+import uuid
+
+ISYMBOL = "_"
+
+class Helper(object):
+    _ENABLE_DEBUG = False
+
+    @classmethod
+    def debug(cls, *args):
+        if cls._ENABLE_DEBUG:
+            print args
+
+    @staticmethod
+    def isIter(v):
+        return hasattr(v, '__iter__')
+
+    @staticmethod
+    def cal(op, left, right):
+        if op == '+':
+            return left + right
+        elif op == '-':
+            return left - right
+        elif op == '*':
+            return left * right
+        elif op == '/':
+            return left / right
+        elif op == '%':
+            return left % right
+        raise Exception("not support op " + op)
+
+class Context(object):
+    kvs = {}
+
+    @classmethod
+    def init(cls, value=None):
+        cls.kvs = {ISYMBOL: value}
+
+    @classmethod
+    def set(cls, key, value):
+        cls.kvs[key] = value
+
+    @classmethod
+    def get(cls, key):
+        if not cls.kvs.has_key(key):
+            raise Exception("cannot find key in this ctx")
+        return cls.kvs.get(key)
+    
+    @classmethod
+    def getSymbol(cls):
+        return cls.kvs.get(ISYMBOL)
+
+def getFuncByName(name):
+    return FuncLoader.instance().getFunc(name)
+
+class FuncInstance(object):
+    def __init__(self, func, location=None, name=None):
+        self.func = func
+        self.location = location
+        if name is None:
+            self.name = self.func.func_name
+        else:
+            self.name = name
+
+    def __call__(self, *args, **kw):
+        return self.func(*args, **kw)
+
+    def __str__(self):
+        return 'func\t%s\t%s' % (self.name, self.location)
+    __repr__ = __str__
+
+class FuncLoader(object):
+    _DEFAULT_LOAD_ORDER = ['.', '/usr/local/etc/streem', '/etc/streem']
+    _ENV_PATH_KEY = 'STREEM_LIB_PATH'
+
+    _INSTANCE = None
+
+    @classmethod
+    def instance(cls):
+        if cls._INSTANCE is None:
+            cls._INSTANCE = cls()
+        return cls._INSTANCE
+
+    def __init__(self):
+        if os.environ.has_key(self._ENV_PATH_KEY):
+            self._DEFAULT_LOAD_ORDER.insert(0, os.environ.get(self._ENV_PATH_KEY))
+
+        self.funcStore = {}
+        self.initBuildinFuncs()
+
+        self.load()
+
+    def initBuildinFuncs(self):
+        funcs = ('sorted', 'range', 'min', 'max', 'set', 'list', 'str', 'int', 'float', 'abs', 'sum')
+        for f in funcs:
+            self.addFunc(eval(f), 'buildin', name=f)
+
+    def load(self):
+        for directory in self._DEFAULT_LOAD_ORDER:
+            self.loadOneDir(directory)
+
+    def loadOneDir(self, directory):
+        files = self.listPyFiles(directory)
+        for f in files:
+            module = imp.load_source(str(uuid.uuid4()), f)
+            functions = inspect.getmembers(module, inspect.isfunction)
+            for name, func in functions:
+                self.addFunc(func, f)
+
+    def addFunc(self, func, filename, name=None):
+        if name is None:
+            name = func.func_name
+        Helper.debug("add func", func, filename, name)
+        if name in self.funcStore:
+            return
+        self.funcStore[name] = FuncInstance(func, filename, name)
+
+    def getFunc(self, name):
+        if not self.funcStore.has_key(name):
+            raise Exception("can not find func %s" % name)
+        return self.funcStore.get(name)
+        
+    def listPyFiles(self, dir):
+        files = set()
+        for root, dirs, fs in os.walk(os.path.abspath(dir)):
+            if not fs:
+                continue
+            root = os.path.abspath(root)
+            for f in fs:
+                if f.endswith('.py'):
+                    files.add(os.path.join(root, f)) 
+        return files
+
+    def listAll(self):
+        for name, func in self.funcStore.iteritems():
+            print func
+
+def parse(content):
+
+    plusorminus = Literal('+') | Literal('-')
+    point = Literal('.')
+    number = Word(nums)
+    integer = Combine( Optional(plusorminus) + number ).setParseAction(lambda t: int(t[0]))
+    floatnumber = Combine( integer + Optional( point + number ) ).setParseAction(lambda t: float(t[0]))
+
+    lpar  = Literal( "(" ).suppress()
+    rpar  = Literal( ")" ).suppress()
+    assign = Literal( "=" ).suppress()
+
+    normalVariable = Word(string.ascii_uppercase, alphanums + '_').setParseAction(lambda t: Variable(t[0]))
+    specialVariable = Literal(ISYMBOL).setParseAction(lambda t: KVariable(t[0]))
+    pipeVarialble = Literal("INPUT").setParseAction(lambda t: Input(t[0]))
+    variable = (pipeVarialble | specialVariable | normalVariable)
+    funcName = Word(string.ascii_lowercase, alphanums + '_').setParseAction(lambda t: FuncName(t[0]))
+    constant = (integer | floatnumber | quotedString.setParseAction(lambda t: t[0][1:-1])).setParseAction(lambda t : Constant(t[0]))
+
+    addop = plusorminus
+    multop = Literal("*") | Literal("/") | Literal("%")
+
+    expr = Forward()
+    funcCall = Forward()
+    atom = (constant | funcCall | variable | ( lpar + expr + rpar )).setParseAction(lambda t: Atom(t[0]))
+    term = Group(atom.setResultsName("left") + ZeroOrMore(( Group(multop.setResultsName("op") + atom.setResultsName("atom")))).setResultsName("right")).setParseAction(lambda t: Term(t[0]))
+    expr << Group(term.setResultsName("left") + ZeroOrMore( ( Group(addop.setResultsName("op") + term.setResultsName("term")))).setResultsName("right")).setParseAction(lambda t: Expr(t[0]))
+
+    funcCall << Group(funcName.setResultsName("name") + lpar + delimitedList(expr).setResultsName("params") + rpar).setParseAction(lambda t: FuncCall(t[0]))
+
+    assignStmt = Group(variable.setResultsName("key") + assign + expr.setResultsName("value")).setParseAction(lambda t: AssignStmt(t[0]))
+    simpleStmt = ( assignStmt | expr )
+    complexFunc = Group(delimitedList(variable).setResultsName("args") + Suppress("->") + delimitedList(simpleStmt, ';').setResultsName("stmts")).setParseAction(lambda t: Func(t[0]))
+
+    func = (complexFunc | expr | funcName)
+
+    funcSep = (Literal('|=') | Literal('|'))
+
+    #codeContent = delimitedList(func, funcSep).setResultsName("blocks").setParseAction(lambda t: CodeContent(t))
+    codeContent = Group(func.setResultsName("left") + ZeroOrMore(Group(funcSep.setResultsName("op") + func.setResultsName("func"))).setResultsName("right")).setParseAction(lambda t: CodeContent(t[0]))
+    return codeContent.parseString(content)
+
+
+class Constant(object):
+    def __init__(self, result):
+        Helper.debug('fyz constant', result)
+        self.value = result
+
+    def __str__(self):
+        return str(self.value)
+
+    __repr__ = __str__
+
+class Input(object):
+    def __init__(self, result):
+        Helper.debug('fyz input', result)
+        self.value = result
+
+    def eval(self):
+        return ''.join(sys.stdin).strip()
+
+    def __str__(self):
+        return "INPUT"
+    __repr__ = __str__
+
+class Variable(object):
+    def __init__(self, result):
+        Helper.debug('fyz variable', result)
+        self.name = result
+
+    def eval(self):
+        return Context.get(self.name)
+
+    def __str__(self):
+        return self.name
+    __repr__ = __str__
+
+class KVariable(object):
+    def __init__(self, result):
+        Helper.debug('fyz KVariable', result)
+        self.name = result
+
+class FuncName(object):
+    def __init__(self, result):
+        Helper.debug('fyz FuncName', result)
+        self.name = result
+
+    def eval(self):
+        f = getFuncByName(self.name)
+        return f(Context.getSymbol())
+
+    def __str__(self):
+        return "<Func>%s" % self.name
+    
+    __repr__ = __str__
+
+class Atom(object):
+    def __init__(self, result):
+        Helper.debug('fyz atom', result)
+        self.value = result
+
+    def eval(self):
+        if isinstance(self.value, Constant):
+            return self.value.value
+        elif isinstance(self.value, Variable) or isinstance(self.value, KVariable):
+            return Context.get(self.value.name)
+        elif isinstance(self.value, FuncCall) or isinstance(self.value, Input) or isinstance(self.value, Expr):
+            return self.value.eval()
+        raise Exception("atom type is error")
+
+    def __str__(self):
+        return str(self.value)
+    __repr__ = __str__
+
+class Term(object):
+    def __init__(self, result):
+        Helper.debug('fyz term', result)
+        self.left = result.left
+        self.right = result.right or []
+
+    def eval(self):
+        result = self.left.eval()
+        for op, atom in self.right:
+            result = Helper.cal(op, result, atom.eval())
+        return result
+
+    def __str__(self):
+        result = str(self.left)
+        for op, atom in self.right:
+            result = '%s %s %s' % (result, op, str(atom))
+        return result
+    __repr__ = __str__
+
+class Expr(object):
+    def __init__(self, result):
+        Helper.debug('fyz expr', result)
+        self.left = result.left
+        self.right = result.right or []
+
+    def eval(self):
+        result = self.left.eval()
+        for op, term in self.right:
+            result = Helper.cal(op, result, term.eval())
+        return result
+
+    def __str__(self):
+        result = str(self.left)
+        for op, term in self.right:
+            result = '%s %s %s' % (result, op, str(term))
+        return result
+    __repr__ = __str__
+
+class FuncCall(object):
+    def __init__(self, result):
+        Helper.debug('fyz funccall', result)
+        self.name = result.name
+        self.params = result.params
+
+    def eval(self):
+        f = getFuncByName(self.name.name)
+        args = [p.eval() for p in self.params]
+        return f(*tuple(args))
+
+    def __str__(self):
+        return '%s(%s)' % (self.name, ','.join([str(v) for v in self.params]))
+    __repr__ = __str__
+
+class Func(object):
+    def __init__(self, result):
+        Helper.debug('fyz func', result)
+        self.args = result.args
+        self.stmts = result.stmts
+
+        if not (self.args and self.stmts):
+            raise Exception("func def error")
+
+    def eval(self):
+        if len(self.args) == 1:
+            arg = self.args[0]
+            Context.set(arg.name, Context.getSymbol())
+        else:
+            if not Helper.isIter(Context.getSymbol()):
+                raise Exception("args num is error, cannot package to it")
+            ipt = Context.getSymbol()
+            for i, arg in enumerate(self.args):
+                if i < len(ipt):
+                    Context.set(arg.name, Context.getSymbol()[i])
+                else:
+                    Context.set(arg.name, None)
+        
+        for i, stmt in enumerate(self.stmts):
+            res = stmt.eval()
+            if i == len(self.stmts) - 1:
+                return res
+
+class AssignStmt(object):
+    def __init__(self, result):
+        Helper.debug('fyz assign', result)
+        self.key = result.key
+        self.value = result.value[0]
+
+    def eval(self):
+        Context.set(self.key.name, self.value.eval())
+        return None
+
+    def __str__(self):
+        return '%s = %s' % (self.key, self.value)
+    __repr__ = __str__
+
+class CodeContent(object):
+    def __init__(self, result):
+        Helper.debug('fyz block', result)
+        self.left = result.left
+        self.right = result.right or []
+
+    def eval(self):
+        Context.init()
+        out = self.left.eval()
+        for op, block in self.right:
+            if op == '|=':
+                if Helper.isIter(out):
+                    new_out = []
+                    for v in out:
+                        Context.init(v)
+                        new_out.append(block.eval())
+                    out = new_out
+                else:
+                    Context.init(out)
+                    out = block.eval()
+            elif op == '|':
+                Context.init(out)
+                out = block.eval()
+            else:
+                raise Exception("eval command not support, only support | and |> now")
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", help="file to execute")
+    parser.add_argument("-e", help="eval string")
+    parser.add_argument("--debug", help="debug sign", action="store_true")
+    parser.add_argument("-l", "--list", help="list all functions", action="store_true")
+    args = parser.parse_args()
+
+    if args.list:
+        FuncLoader.instance().listAll()
+    else:
+        content = args.e
+        if args.f is not None:
+            with open(args.f, 'r') as fp:
+                content = ''.join(fp.readlines()).strip()
+        
+        Helper._ENABLE_DEBUG = args.debug
+        Helper.debug(content)
+        parse(content)[0].eval()
