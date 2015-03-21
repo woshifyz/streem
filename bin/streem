@@ -1,0 +1,22 @@
+#!/usr/bin/env python
+# coding: utf8
+
+from streem import Streem
+import argparse
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("content", help="content to eval", default=None)
+    parser.add_argument("-i", "--include", help="add lib dir")
+    parser.add_argument("--debug", help="debug sign", action="store_true")
+    parser.add_argument("--strict", help="turn no strict mode", action="store_true")
+    args = parser.parse_args()
+
+    if args.include:
+        Streem.add_load_dir(args.include)
+
+    content = args.content
+    Streem.is_debug(args.debug)
+    Streem.is_strict_mode(args.strict)
+
+    Streem.parse(content)[0].eval()
